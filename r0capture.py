@@ -28,7 +28,7 @@ __author__ = "geffner@google.com (Jason Geffner)"
 __version__ = "2.0"
 
 """
-# r0cap
+# r0capture
 
 ID: r0ysue 
 
@@ -59,6 +59,7 @@ import socket
 import struct
 import time
 import sys
+from pathlib import Path
 
 import frida
 
@@ -73,13 +74,62 @@ try:
     import hexdump  # pylint: disable=g-import-not-at-top
 except ImportError:
     pass
+try:
+    from shutil import get_terminal_size as get_terminal_size
+except:
+    try:
+        from backports.shutil_get_terminal_size import get_terminal_size as get_terminal_size
+    except:
+        pass
+
+
+try:
+    import click
+except:
+    class click:
+        @staticmethod
+        def secho(message=None, **kwargs):
+            print(message)
+        @staticmethod
+        def style(**kwargs):
+            raise Exception("unsupported style")
+
+banner = """
+--------------------------------------------------------------------------------------------
+           .oooo.                                      .                                  
+          d8P'`Y8b                                   .o8                                  
+oooo d8b 888    888  .ooooo.   .oooo.   oo.ooooo.  .o888oo oooo  oooo  oooo d8b  .ooooo.  
+`888""8P 888    888 d88' `"Y8 `P  )88b   888' `88b   888   `888  `888  `888""8P d88' `88b 
+ 888     888    888 888        .oP"888   888   888   888    888   888   888     888ooo888 
+ 888     `88b  d88' 888   .o8 d8(  888   888   888   888 .  888   888   888     888    .o 
+d888b     `Y8bd8P'  `Y8bod8P' `Y888""8o  888bod8P'   "888"  `V88V"V8P' d888b    `Y8bod8P' 
+                                         888                                              
+                                        o888o                                                                                                                                       
+                    https://github.com/r0ysue/r0capture
+--------------------------------------------------------------------------------------------\n
+"""
+
+
+def show_banner():
+    colors = ['bright_red', 'bright_green', 'bright_blue', 'cyan', 'magenta']
+    try:
+        click.style('color test', fg='bright_red')
+    except:
+        colors = ['red', 'green', 'blue', 'cyan', 'magenta']
+    try:
+        columns = get_terminal_size().columns
+        if columns >= len(banner.splitlines()[1]):
+            for line in banner.splitlines():
+                click.secho(line, fg=random.choice(colors))
+    except:
+        pass
 
 # ssl_session[<SSL_SESSION id>] = (<bytes sent by client>,
 #                                  <bytes sent by server>)
 ssl_sessions = {}
 
 
-def ssl_log(process, pcap=None, verbose=False, isUsb=False, ssllib="", isSpawn=True, wait=0):
+def ssl_log(process, pcap=None, host=False, verbose=False, isUsb=False, ssllib="", isSpawn=True, wait=0):
     """Decrypts and logs a process's SSL traffic.
     Hooks the functions SSL_read() and SSL_write() in a given process and logs
     the decrypted data to the console and/or to a pcap file.
@@ -169,9 +219,11 @@ def ssl_log(process, pcap=None, verbose=False, isUsb=False, ssllib="", isSpawn=T
             pprint.pprint(message)
             os.kill(os.getpid(), signal.SIGTERM)
             return
-        if len(data) == 0:
+        if len(data) == 1:
+            print(message["payload"]["function"])
+            print(message["payload"]["stack"])
             return
-        p = message["payload"]
+        p = message["payload"]        
         if verbose:
             src_addr = socket.inet_ntop(socket.AF_INET,
                                         struct.pack(">I", p["src_addr"]))
@@ -185,16 +237,22 @@ def ssl_log(process, pcap=None, verbose=False, isUsb=False, ssllib="", isSpawn=T
                 dst_addr,
                 p["dst_port"]))
             hexdump.hexdump(data)
-            print()
+            print(p["stack"])
         if pcap:
             log_pcap(pcap_file, p["ssl_session_id"], p["function"], p["src_addr"],
                      p["src_port"], p["dst_addr"], p["dst_port"], data)
 
     if isUsb:
-        device = frida.get_usb_device()
-        # session = device.attach(process)
+        try:
+            device = frida.get_usb_device()
+        except:
+            device = frida.get_remote_device()
     else:
-        device = frida.get_local_device()
+        if host:
+            manager = frida.get_device_manager()
+            device = manager.add_remote_device(host)
+        else:
+            device = frida.get_local_device()
 
     if isSpawn:
         pid = device.spawn([process])
@@ -227,7 +285,7 @@ def ssl_log(process, pcap=None, verbose=False, isUsb=False, ssllib="", isSpawn=T
                 ("=I", 228)):  # Data link type (LINKTYPE_IPV4)
             pcap_file.write(struct.pack(writes[0], writes[1]))
 
-    with open("./script.js", encoding="utf-8") as f:
+    with open(Path(__file__).resolve().parent.joinpath("./script.js"), encoding="utf-8") as f:
         _FRIDA_SCRIPT = f.read()
         # _FRIDA_SCRIPT = session.create_script(content)
         # print(_FRIDA_SCRIPT)
@@ -252,6 +310,7 @@ def ssl_log(process, pcap=None, verbose=False, isUsb=False, ssllib="", isSpawn=T
     sys.stdin.read()
 
 if __name__ == "__main__":
+    show_banner()
     class ArgParser(argparse.ArgumentParser):
 
         def error(self, message):
@@ -279,6 +338,8 @@ Examples:
     args = parser.add_argument_group("Arguments")
     args.add_argument("-pcap", '-p', metavar="<path>", required=False,
                       help="Name of PCAP file to write")
+    args.add_argument("-host", '-H', metavar="<192.168.1.1:27042>", required=False,
+                      help="connect to remote frida-server on HOST")
     args.add_argument("-verbose","-v",  required=False, action="store_const", default=True,
                       const=True, help="Show verbose output")
     args.add_argument("process", metavar="<process name | process id>",
@@ -293,4 +354,13 @@ Examples:
                       help="Time to wait for the process")
 
     parsed = parser.parse_args()
-    ssl_log(int(parsed.process) if parsed.process.isdigit() else parsed.process, parsed.pcap, parsed.verbose, isUsb=parsed.isUsb, isSpawn=parsed.isSpawn, ssllib=parsed.ssl, wait=parsed.wait)
+    ssl_log(
+        int(parsed.process) if parsed.process.isdigit() else parsed.process, 
+    parsed.pcap, 
+    parsed.host,
+    parsed.verbose, 
+    isUsb=parsed.isUsb, 
+    isSpawn=parsed.isSpawn, 
+    ssllib=parsed.ssl, 
+    wait=parsed.wait
+    )
